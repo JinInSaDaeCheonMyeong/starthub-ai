@@ -1,0 +1,9 @@
+sentence-transformers
+faiss-cpu
+numpy
+pinecone
+python-dotenv
+fastapi
+uvicorn
+APScheduler
+gunicorn
