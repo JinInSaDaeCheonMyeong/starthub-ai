@@ -26,7 +26,7 @@ jobs:
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/starthub-ai:latest
 
   deploy:
-    name: Deploy to Server
+    needs: build
     runs-on: ubuntu-latest
     steps:
       - name: SSH and Deploy
@@ -39,4 +39,3 @@ jobs:
             docker pull ${{ secrets.DOCKERHUB_USERNAME }}/starthub-ai:latest
             docker stop starthub-container && docker rm starthub-container || true
             docker run -d -p 8000:8000 --env-file .env --name starthub-container --restart unless-stopped ${{ secrets.DOCKERHUB_USERNAME }}/starthub-ai:latest
-
