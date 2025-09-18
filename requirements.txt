@@ -1,5 +1,4 @@
 sentence-transformers
-faiss-cpu
 numpy
 pinecone
 python-dotenv
