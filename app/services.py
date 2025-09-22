@@ -1,12 +1,16 @@
 import re
 import requests
+from datetime import datetime
 from pinecone import Pinecone, PodSpec
+import openai
+import json
 from sentence_transformers import SentenceTransformer
 
 from app import config
 
 embedding_model = None
 pinecone_index = None
+openai_client = None
 
 
 def clean_html(raw_html: str) -> str:
@@ -62,7 +66,17 @@ def update_jobs_in_pinecone():
         if len(description) > config.MAX_METADATA_DESCRIPTION_LENGTH:
             truncated_description += "..."
 
-        metadata = {"title": title, "url": url, "description": truncated_description}
+        metadata = {
+            "title": title,
+            "url": url,
+            "description": truncated_description,
+            "organization": job.get('organization', ''),
+            "region": job.get('region', ''),
+            "startupHistory": job.get('startupHistory', ''),
+            "supportField": job.get('supportField', ''),
+            "receptionPeriod": job.get('receptionPeriod', ''),
+            "is_active": True
+        }
         vectors_to_upsert.append((job_id, vector, metadata))
 
     if vectors_to_upsert:
@@ -72,7 +86,7 @@ def update_jobs_in_pinecone():
 
 
 def initialize_services():
-    global embedding_model, pinecone_index
+    global embedding_model, pinecone_index, openai_client
 
     embedding_model = SentenceTransformer(config.MODEL_NAME)
     embedding_dimension = embedding_model.get_sentence_embedding_dimension()
@@ -87,3 +101,137 @@ def initialize_services():
             spec=PodSpec(environment=config.PINECONE_ENVIRONMENT)
         )
     pinecone_index = pinecone_client.Index(config.INDEX_NAME)
+
+    if config.OPENAI_API_KEY:
+        openai_client = openai.OpenAI(api_key=config.OPENAI_API_KEY)
+
+
+def get_recommendations(user_interests: list[str]) -> list:
+    if not embedding_model or not pinecone_index:
+        return []
+
+    interest_query = ", ".join(user_interests)
+    query_vector = embedding_model.encode(interest_query, convert_to_tensor=False).tolist()
+
+    try:
+        results = pinecone_index.query(
+            vector=query_vector,
+            top_k=5,
+            include_metadata=True,
+            filter={"is_active": {"$eq": True}}
+        )
+        return results.get('matches', [])
+    except Exception as _:
+        return []
+
+def deactivate_expired_jobs():
+    if not pinecone_index:
+        return
+
+    print("일일 작업 실행: 만료된 공고 비활성화 중...")
+    try:
+        stats = pinecone_index.describe_index_stats()
+        total_vectors = stats['total_vector_count']
+        if total_vectors == 0:
+            return
+
+        zero_vector = [0.0] * embedding_model.get_sentence_embedding_dimension()
+        response = pinecone_index.query(
+            vector=zero_vector,
+            filter={"is_active": {"$eq": True}},
+            top_k=10000,
+            include_metadata=True
+        )
+
+        deactivated_count = 0
+        for match in response.get('matches', []):
+            reception_period = match.get('metadata', {}).get('receptionPeriod', '')
+            if not reception_period:
+                continue
+
+            try:
+                end_date_str = reception_period.split('~')[1].strip()
+                end_date = datetime.strptime(end_date_str, '%Y-%m-%d %H:%M')
+                if datetime.now() > end_date:
+                    pinecone_index.update(id=match['id'], set_metadata={"is_active": False})
+                    deactivated_count += 1
+            except (IndexError, ValueError):
+                continue
+        
+        print(f"{deactivated_count}개의 공고를 비활성화했습니다.")
+
+    except Exception as e:
+        print(f"비활성화 작업 중 오류 발생: {e}")
+
+def search_jobs_by_natural_language(query: str, top_k: int = 10) -> list:
+    if not all([embedding_model, pinecone_index, openai_client]):
+        return []
+
+    def _parse_query_with_openai(raw_query: str) -> dict:
+        system_prompt = '''
+        당신은 대한민국 채용 정보 게시판의 검색어 구문 분석 어시스턴트입니다.
+        사용자의 원본 검색어가 주어지면, 이를 "semantic_query", "filters", "top_k" 세 개의 필드를 가진 구조화된 JSON 객체로 분해하세요.
+
+        1. `semantic_query`: 시맨틱 벡터 검색을 위한 검색어의 핵심 부분입니다. 필터와 관련된 모든 키워드를 제거하세요. 이 값은 한국어여야 합니다.
+        2. `filters`: 필터 객체의 목록입니다. 각 객체는 "field"와 "value"를 가져야 합니다.
+           - 알려진 필터 `field` 이름은 `region`, `startupHistory` 입니다.
+           - `region`의 경우, 일반적인 한국의 시/도 이름을 전체 공식 명칭으로 매핑하세요 (예: "서울" -> "서울특별시", "대구" -> "대구광역시", "경남" -> "경상남도").
+        3. `top_k`: 요청된 결과의 수입니다 (예: "5개" -> 5). 지정되지 않은 경우 기본값은 10입니다.
+
+        한국어 오타는 자연스럽게 처리하세요. 단어가 필터 키워드처럼 보이지만 철자가 틀린 경우, 이를 수정하세요.
+
+        --- 예시 ---
+        사용자 검색어: "서울에서 하는 예비창업자 IT 공고 3개"
+        당신의 JSON 출력:
+        {
+          "semantic_query": "IT 공고",
+          "filters": [
+            {"field": "region", "value": "서울특별시"},
+            {"field": "startupHistory", "value": "예비창업자"}
+          ],
+          "top_k": 3
+        }
+        ---
+
+        출력은 다른 텍스트 없이 JSON 객체만이어야 합니다.
+        '''
+        response = openai_client.chat.completions.create(
+            model="gpt-3.5-turbo-0125",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": raw_query}
+            ],
+            response_format={"type": "json_object"}
+        )
+        return json.loads(response.choices[0].message.content)
+
+    structured_query = _parse_query_with_openai(query)
+
+    final_top_k = structured_query.get("top_k", top_k)
+    semantic_query_text = structured_query.get("semantic_query", "")
+
+    final_filter = {"is_active": {"$eq": True}}
+    filters_from_llm = structured_query.get("filters", [])
+    if filters_from_llm:
+        pinecone_filters = [{f["field"]: {"$eq": f["value"]}} for f in filters_from_llm]
+        final_filter["$and"] = pinecone_filters
+
+    if not semantic_query_text and filters_from_llm:
+        semantic_query_text = "창업 지원 공고"
+
+    if not semantic_query_text:
+        return []
+
+    query_vector = embedding_model.encode(semantic_query_text, convert_to_tensor=False).tolist()
+
+    try:
+        results = pinecone_index.query(
+            vector=query_vector,
+            top_k=final_top_k,
+            include_metadata=True,
+            filter=final_filter
+        )
+        return results.get('matches', [])
+    except Exception as e:
+        print(f"검색 중 오류 발생: {e}")
+        return []

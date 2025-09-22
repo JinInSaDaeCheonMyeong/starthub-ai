@@ -6,6 +6,7 @@ load_dotenv()
 
 PINECONE_API_KEY = os.environ.get("PINECONE_API_KEY")
 PINECONE_ENVIRONMENT = os.environ.get("PINECONE_ENVIRONMENT")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
 INDEX_NAME = "announcement"
 MODEL_NAME = 'paraphrase-multilingual-MiniLM-L12-v2'
