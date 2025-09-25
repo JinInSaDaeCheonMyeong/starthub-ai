@@ -123,7 +123,7 @@ def get_recommendations(user_interests: list[str], liked_announcement_ids: list[
 
             if liked_vectors:
                 average_liked_vector = np.mean(liked_vectors, axis=0)
-                final_vector = 0.7 * interest_vector + 0.3 * average_liked_vector
+                final_vector = 0.5 * interest_vector + 0.5 * average_liked_vector
 
         except Exception as e:
             print(f"'좋아요' 공고 벡터 조회 중 오류 발생: {e}")
