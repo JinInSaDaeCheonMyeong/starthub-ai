@@ -1,4 +1,5 @@
 import uvicorn
+import re
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -31,15 +32,21 @@ app = FastAPI(
 
 
 @app.post("/recommend", summary="공고 추천 받기")
-def get_recommendations(user_data: models.UserInterests):
+def get_recommendations(request_data: models.RecommendationRequest):
     if services.embedding_model is None or services.pinecone_index is None:
         raise HTTPException(status_code=503, detail="서버가 아직 준비되지 않았습니다. 잠시 후 다시 시도해주세요.")
 
-    user_interests = user_data.interests
-    if not user_interests:
+    if not request_data.interests:
         raise HTTPException(status_code=400, detail="관심사 목록이 비어있습니다.")
 
-    results = services.get_recommendations(user_interests)
+    liked_ids = []
+    if request_data.liked_announcements and request_data.liked_announcements.content:
+        for announcement in request_data.liked_announcements.content:
+            match = re.search(r'pbancSn=(\d+)', announcement.url)
+            if match:
+                liked_ids.append(match.group(1))
+
+    results = services.get_recommendations(request_data.interests, liked_announcement_ids=liked_ids)
     recommendations = []
     for result in results:
         recommendations.append({
@@ -77,4 +84,4 @@ def search_jobs(search_data: models.SearchQuery):
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    uvicorn.run(app)

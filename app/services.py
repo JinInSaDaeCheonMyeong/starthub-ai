@@ -5,6 +5,7 @@ from pinecone import Pinecone, PodSpec
 import openai
 import json
 from sentence_transformers import SentenceTransformer
+import numpy as np
 
 from app import config
 
@@ -106,22 +107,39 @@ def initialize_services():
         openai_client = openai.OpenAI(api_key=config.OPENAI_API_KEY)
 
 
-def get_recommendations(user_interests: list[str]) -> list:
+def get_recommendations(user_interests: list[str], liked_announcement_ids: list[str] = None) -> list:
     if not embedding_model or not pinecone_index:
         return []
 
     interest_query = ", ".join(user_interests)
-    query_vector = embedding_model.encode(interest_query, convert_to_tensor=False).tolist()
+    interest_vector = embedding_model.encode(interest_query, convert_to_tensor=False)
+
+    final_vector = interest_vector
+
+    if liked_announcement_ids:
+        try:
+            liked_vectors_response = pinecone_index.fetch(ids=liked_announcement_ids)
+            liked_vectors = [vec.values for vec in liked_vectors_response.vectors.values()]
+
+            if liked_vectors:
+                average_liked_vector = np.mean(liked_vectors, axis=0)
+                final_vector = 0.7 * interest_vector + 0.3 * average_liked_vector
+
+        except Exception as e:
+            print(f"'좋아요' 공고 벡터 조회 중 오류 발생: {e}")
+
+    query_vector = final_vector.tolist()
 
     try:
         results = pinecone_index.query(
             vector=query_vector,
-            top_k=5,
+            top_k=20,
             include_metadata=True,
             filter={"is_active": {"$eq": True}}
         )
         return results.get('matches', [])
-    except Exception as _:
+    except Exception as e:
+        print(f"추천 검색 중 오류 발생: {e}")
         return []
 
 def deactivate_expired_jobs():
