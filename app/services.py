@@ -240,7 +240,11 @@ def search_jobs_by_natural_language(query: str, top_k: int = 10) -> list:
     if not semantic_query_text:
         return []
 
-    query_vector = embedding_model.encode(semantic_query_text, convert_to_tensor=False).tolist()
+    original_query_vector = embedding_model.encode(query, convert_to_tensor=False)
+    semantic_query_vector = embedding_model.encode(semantic_query_text, convert_to_tensor=False)
+
+    combined_vector = (0.7 * original_query_vector + 0.3 * semantic_query_vector)
+    query_vector = combined_vector.tolist()
 
     try:
         results = pinecone_index.query(
@@ -249,7 +253,21 @@ def search_jobs_by_natural_language(query: str, top_k: int = 10) -> list:
             include_metadata=True,
             filter=final_filter
         )
-        return results.get('matches', [])
+        matches = results.get('matches', [])
+
+        partial_matches = []
+        other_matches = []
+        query_stripped = query.strip()
+
+        for match in matches:
+            title = match.get('metadata', {}).get('title', '').strip()
+            if query_stripped in title:
+                partial_matches.append(match)
+            else:
+                other_matches.append(match)
+
+        return partial_matches + other_matches
+
     except Exception as e:
         print(f"검색 중 오류 발생: {e}")
         return []
